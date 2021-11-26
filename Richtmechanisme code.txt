@@ -1,0 +1,305 @@
+/*
+* Arduino Wireless Communication Tutorial
+*     Example 2 - Receiver Code
+*                
+* by Dejan Nedelkovski, www.HowToMechatronics.com
+* 
+* Library: TMRh20/RF24, https://github.com/tmrh20/RF24/
+*/
+//------------------- Includes -------------------//
+#include <SPI.h>
+#include <nRF24L01.h>
+#include <RF24.h>
+
+//------------------- SPI ------------------------//
+RF24 radio(7, 8); // CE(D7), CSN(D8), MOSI(D11), MISO(D12), SCK(D13)
+const byte addresses[][6] = {"00001", "00002"};
+
+enum Machinestate {
+  machine_entry = 0,
+  machine_initialisatie = 1,
+  machine_wait = 2,
+  machine_running = 3,
+  machine_stop = 4
+};
+Machinestate state;
+
+bool rustpositie = false;
+
+int knoppen_waarden[6]; // noodstop, startknop, stopknop, laadknop, schietknop, joystick
+int noodstop_waarde = 0;
+int startknop_waarde = 0;
+int stopknop_waarde = 0;
+int laadknop_waarde = 0;
+int schietknop_waarde = 0;
+int joystick_waarde = 521;
+
+int feedback_data[3]; // state, foutmelding_initialisatie_programma, foutmelding_positie_programma
+int foutmelding_initialisatie_programma = 0;
+int foutmelding_positie_programma = 0;
+
+//------------------- IO-lijst -------------------//
+// ingangen
+const int potmeter = A0;  // potentiometer feedback van de lineaire actuator
+// uitgangen
+const int bluskanon_laden = 2;
+const int bluskanon_schieten = 3;
+const int lineaire_actuator_uit = 4;
+const int lineaire_actuator_in = 5;
+const int lineaire_actuator_snelheid = 6;
+
+//-------------------- Timers --------------------//
+long previousMillis = 0;
+long timeout_tijd = 200; 
+unsigned long currentMillis= 0;
+
+void setup() {
+  pinMode(potmeter, INPUT);
+
+  pinMode(bluskanon_laden, OUTPUT);
+  pinMode(bluskanon_schieten, OUTPUT);
+  pinMode(lineaire_actuator_uit, OUTPUT);
+  pinMode(lineaire_actuator_in, OUTPUT);
+  pinMode(lineaire_actuator_snelheid, OUTPUT);
+  
+  radio.begin();
+  radio.openWritingPipe(addresses[0]); // 00001
+  radio.openReadingPipe(1, addresses[1]); // 00002
+  radio.setPALevel(RF24_PA_MIN);
+  radio.setChannel(124);
+
+  state = machine_entry;
+}
+
+
+
+
+
+
+void loop() {
+// Write
+  delay(5);
+  radio.stopListening();
+
+  feedback_data[0] = state; // machine_entry = 0, machine_initialisatie = 1, machine_wait = 2, machine_running = 3, machine_stop = 4
+  feedback_data[1] = foutmelding_initialisatie_programma; // correct uitgevoerd = 2, incorrect uitgevoerd = 1
+  feedback_data[2] = foutmelding_positie_programma; // correct uitgevoerd = 2, incorrect uitgevoerd = 1
+  
+  radio.write(&feedback_data, sizeof(feedback_data));
+  delay(5);
+
+// Read
+  radio.startListening();
+  previousMillis =  millis();
+  while (!radio.available()) {  // testen door RF24 uit te schakelen terwijl positieprogramma loopt en dan zonder de timeout
+    currentMillis = millis();
+    if(currentMillis - previousMillis > timeout_tijd){
+      noodstop_programma();
+    }
+  }
+  radio.read(&knoppen_waarden, sizeof(knoppen_waarden));
+  
+  noodstop_waarde = knoppen_waarden[0];
+  startknop_waarde = knoppen_waarden[1];
+  stopknop_waarde = knoppen_waarden[2];
+  laadknop_waarde = knoppen_waarden[3];
+  schietknop_waarde = knoppen_waarden[4];
+  joystick_waarde = knoppen_waarden[5];
+
+  hoofdprogramma(noodstop_waarde, startknop_waarde, stopknop_waarde, laadknop_waarde, schietknop_waarde, joystick_waarde);
+}
+//------------------ Programma's -----------------//
+void hoofdprogramma(int noodstop_waarde, int startknop_waarde, int stopknop_waarde, int laadknop_waarde, int schietknop_waarde, int joystick_waarde)
+{
+  if(noodstop_waarde == 1) {
+    noodstop_programma();
+    state = machine_entry;
+  }
+  else {
+    
+    switch (state) {
+      case machine_entry:
+        if(startknop_waarde == 1 && stopknop_waarde == 0) {
+          state = machine_initialisatie;
+        }
+
+        break;
+      case machine_initialisatie:
+        initialisatie_programma();  
+        bepalen_rustpositie();   // bepalen of de actuator op rustpositie is
+      
+        if(rustpositie == true) {
+          lineaire_actuator_stop();
+          foutmelding_initialisatie_programma = 2;  // initialisatie_programma is correct uitgevoerd
+          state = machine_wait;
+        }
+        else {
+          foutmelding_initialisatie_programma = 1;  // initialisatie_programma is incorrect uitgevoerd
+        }
+        
+        break;
+      case machine_wait:
+        if(startknop_waarde == 1 && stopknop_waarde == 0) {
+          state = machine_running;
+        }
+        
+        break;
+      case machine_running:
+        positie_programma(joystick_waarde);
+        schiet_programma(laadknop_waarde, schietknop_waarde);
+
+        if(stopknop_waarde == 1) {
+          state = machine_stop;
+        }
+        
+        break;
+      case machine_stop:
+        initialisatie_programma();  
+        bepalen_rustpositie();   // bepalen of de actuator op rustpositie is
+      
+        if(rustpositie == true) {
+          lineaire_actuator_stop();
+          foutmelding_initialisatie_programma = 2;  // initialisatie_programma is correct uitgevoerd
+          state = machine_wait;
+        }
+        else {
+          foutmelding_initialisatie_programma = 1;  // initialisatie_programma is incorrect uitgevoerd
+        }
+
+        break;
+    }
+  }
+  
+}
+
+void initialisatie_programma()
+{
+  lineaire_actuator_rustpositie();
+  
+  digitalWrite(bluskanon_laden, LOW);
+  digitalWrite(bluskanon_schieten, LOW);
+}
+
+void noodstop_programma()
+{
+  lineaire_actuator_stop();
+
+  digitalWrite(bluskanon_laden, LOW);
+  digitalWrite(bluskanon_schieten, LOW);
+}
+
+void positie_programma(int joystick_waarde)
+{
+  const int deadband_low = 470;   // als de joystick in het midden is, is de waarde ongeveer 521, de deadband is 521 +/- 51
+  const int deadband_high = 572;
+  const int maximale_snelheid = 255;
+  
+  int snelheid;   // snelheid van de lineaire actuator: 0-255
+
+  if(joystick_waarde < 0 || joystick_waarde > 1023) { // als de joystick buiten de limieten komt, is het positie_programma incorrect uitgevoerd
+    foutmelding_positie_programma = 1;
+  }
+  
+  if(joystick_waarde < deadband_low) { // Richtmechanisme omlaag bewegen
+    joystick_waarde = deadband_low - joystick_waarde;
+    
+    snelheid = map(joystick_waarde, 0, deadband_low, 0, maximale_snelheid); // snelheid als functie van de joystick-waarde
+    
+    if(snelheid > 10 && snelheid <= maximale_snelheid) {  // snelheid limieten
+      lineaire_actuator_uitsturen(snelheid);
+    }
+    else {  // als de snelheid te hoog of laag wordt, wordt de actuator stopgezet
+      lineaire_actuator_stop();
+    }
+  }
+  else if(joystick_waarde > deadband_high) {  // Richtmechanisme omhoog bewegen
+    snelheid = map(joystick_waarde, deadband_high, 1023, 0, maximale_snelheid);
+    
+    if(snelheid > 10 && snelheid <= maximale_snelheid) { // snelheid limieten
+      lineaire_actuator_insturen(snelheid);
+    }
+    else {  // als de snelheid te hoog of laag wordt, wordt de actuator stopgezet
+      lineaire_actuator_stop();
+    }
+  }
+  else {
+    lineaire_actuator_stop(); // als de joystick binnen de deadband is, wordt de actuator stopgezet
+  }
+  
+  foutmelding_positie_programma = 2;  // positie_programma correct uitgevoerd
+}
+
+void schiet_programma(int laadknop_waarde, int schietknop_waarde)
+{
+  if(schietknop_waarde) {
+    digitalWrite(bluskanon_schieten, HIGH);
+  }
+  else {
+    digitalWrite(bluskanon_schieten, LOW);
+  }
+
+  if(laadknop_waarde) {
+    digitalWrite(bluskanon_laden, HIGH);
+  }
+  else {
+    digitalWrite(bluskanon_laden, LOW);
+  }
+}
+
+//------------------- Functies -------------------//
+void lineaire_actuator_rustpositie()
+{
+  const int precisie = 50;
+  const int gewenste_positie = 512;
+  int lage_snelheid = 127;  // maximale snelheid 255
+
+  int positie = analogRead(potmeter);   // Positie actuator: 0-1023
+     
+  if(positie < (gewenste_positie - precisie)) {
+    lineaire_actuator_uitsturen(lage_snelheid);
+  }
+  else if(positie > (gewenste_positie + precisie)) {
+    lineaire_actuator_insturen(lage_snelheid);
+  }
+}
+
+void lineaire_actuator_uitsturen(int snelheid)   // snelheid: 0-255
+{
+  digitalWrite(lineaire_actuator_uit, HIGH);
+  digitalWrite(lineaire_actuator_in, LOW);
+  analogWrite(lineaire_actuator_snelheid, snelheid);
+}
+
+void lineaire_actuator_insturen(int snelheid)    // snelheid: 0-255
+{
+  digitalWrite(lineaire_actuator_uit, LOW);
+  digitalWrite(lineaire_actuator_in, HIGH);
+  analogWrite(lineaire_actuator_snelheid, snelheid);
+}
+
+void lineaire_actuator_stop()
+{
+  digitalWrite(lineaire_actuator_uit, LOW);
+  digitalWrite(lineaire_actuator_in, LOW);
+  analogWrite(lineaire_actuator_snelheid, 0);
+}
+
+void bepalen_rustpositie()
+{
+  const int precisie = 50;
+  const int gewenste_positie = 512;
+
+  int positie = analogRead(potmeter);   // Positie actuator: 0-1023
+  
+  if(positie > (gewenste_positie - precisie) && positie < (gewenste_positie + precisie)) {
+    rustpositie = true;
+  }
+  else {
+    rustpositie = false;
+  }
+}
+
+
+480 & -425
+
+21, 71, 111

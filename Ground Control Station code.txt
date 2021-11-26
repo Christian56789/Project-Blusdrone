@@ -1,0 +1,133 @@
+/*
+* Arduino Wireless Communication Tutorial
+*     Example 2 - Transmitter Code
+*                
+* by Dejan Nedelkovski, www.HowToMechatronics.com
+* 
+* Library: TMRh20/RF24, https://github.com/tmrh20/RF24/
+*/
+//------------------- Includes -------------------//
+#include <SPI.h>
+#include <nRF24L01.h>
+#include <RF24.h>
+
+RF24 radio(7, 8); // CE(D7), CSN(D8), MOSI(D11), MISO(D12), SCK(D13)
+const byte addresses[][6] = {"00001", "00002"};
+
+enum Machinestate {
+  machine_entry = 0,
+  machine_initialisatie = 1,
+  machine_wait = 2,
+  machine_running = 3,
+  machine_stop = 4
+};
+Machinestate state;
+
+int knoppen_waarden[6]; // noodstop, startknop, stopknop, laadknop, schietknop, joystick
+int feedback_data[3]; // state, foutmelding_initialisatie_programma, foutmelding_positie_programma
+
+//------------------- IO-lijst -------------------//
+// ingangen
+const int noodstop = 2;  // standaardwaarde is 0, dus niet inverteren
+const int startknop = 3;
+const int stopknop = 4;
+const int laadknop = 5;
+const int schietknop = 6;
+const int joystick = A0;
+
+//-------------------- Timers --------------------//
+long previousMillis = 0;
+long interval = 1000; 
+unsigned long currentMillis= 0;
+
+void setup() {
+  pinMode(noodstop, INPUT_PULLUP);
+  pinMode(startknop, INPUT_PULLUP);
+  pinMode(stopknop, INPUT_PULLUP);
+  pinMode(laadknop, INPUT_PULLUP);
+  pinMode(schietknop, INPUT_PULLUP);
+  pinMode(joystick, INPUT);
+
+  Serial.begin(9600);
+  
+  radio.begin();
+  radio.openWritingPipe(addresses[1]); // 00002
+  radio.openReadingPipe(1, addresses[0]); // 00001
+  radio.setPALevel(RF24_PA_MIN);
+  radio.setChannel(124);
+}
+void loop() {
+// Write
+  delay(5);
+  radio.stopListening();
+
+  knoppen_waarden[0] = digitalRead(noodstop);
+  knoppen_waarden[1] = !digitalRead(startknop);
+  knoppen_waarden[2] = !digitalRead(stopknop);
+  knoppen_waarden[3] = !digitalRead(laadknop);
+  knoppen_waarden[4] = !digitalRead(schietknop);
+  knoppen_waarden[5] = analogRead(joystick);
+  
+  radio.write(&knoppen_waarden, sizeof(knoppen_waarden));
+  delay(5);
+
+
+
+// Read
+  radio.startListening();
+  while (!radio.available());
+  radio.read(&feedback_data, sizeof(feedback_data));
+
+  currentMillis = millis();
+  if(currentMillis - previousMillis > interval) { 
+    previousMillis = currentMillis;   
+    
+    print_machinestate(feedback_data[0]);
+    print_foutmelding_initialisatie_programma(feedback_data[1]);
+    print_foutmelding_positie_programma(feedback_data[2]);
+  }
+}
+
+//------------------- Functies -------------------//
+void print_machinestate(int state)
+{
+  Serial.print("\n");
+  
+  if(state == 0) {
+    Serial.print("State: machine entry\n");
+  }
+  else if(state == 1) {
+    Serial.print("State: machine_initialisatie\n");
+  }
+  else if(state == 2) {
+    Serial.print("State: machine_wait\n");
+  }
+  else if(state == 3) {
+    Serial.print("State: machine_running\n");
+  }
+  else if(state == 4) {
+    Serial.print("State: machine_stop\n");
+  }
+  
+  Serial.print("\n");
+}
+
+void print_foutmelding_initialisatie_programma(int foutmelding)
+{
+  if(foutmelding == 2) {
+    Serial.print("Het initialisatie_programma is correct uitgevoerd\n");
+  }
+  else if(foutmelding == 1) {
+    Serial.print("Het initialisatie_programma is incorrect uitgevoerd\n");
+  }
+}
+
+void print_foutmelding_positie_programma(int foutmelding)
+{
+  if(foutmelding == 2) {
+    Serial.print("Het positie_programma is correct uitgevoerd\n");
+  }
+  else if(foutmelding == 1) {
+    Serial.print("Het positie_programma is incorrect uitgevoerd\n");
+  }
+}
