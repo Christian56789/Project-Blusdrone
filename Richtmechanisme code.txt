@@ -298,8 +298,3 @@ void bepalen_rustpositie()
     rustpositie = false;
   }
 }
-
-
-480 & -425
-
-21, 71, 111
